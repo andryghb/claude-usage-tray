@@ -800,13 +800,17 @@ namespace ClaudeUsageTray
         {
             var limits = Limits();
             var session = limits.FirstOrDefault(l => l.Kind == "session");
-            var week = limits.FirstOrDefault(l => l.Kind == "weekly_all");
+            // The ring shows the fullest weekly limit, all models or a single model's; ties go to all models.
+            var week = limits.Where(l => l.Kind.StartsWith("weekly"))
+                .OrderByDescending(l => l.EffectivePct).ThenBy(l => l.Kind == "weekly_all" ? 0 : 1).FirstOrDefault();
             if (session == null) { SetIcon(-1, -1, 0); tray.Text = Trim("Claude usage — " + (Api != null && Api.Error != null ? Api.Error : "no data")); return; }
 
             SetIcon(session.EffectivePct, week == null ? -1 : week.EffectivePct, limits.Max(l => l.EffectivePct));
             var text = "Claude · 5h " + Math.Round(session.Pct) + "%";
             if (session.ResetUtc.HasValue) text += " (" + Fmt.Span(session.ResetUtc.Value - NowUtc) + ")";
-            if (week != null) text += " · week " + Math.Round(week.Pct) + "%";
+            if (week != null)
+                text += " · " + (week.Kind == "weekly_all" ? "week" : week.Label.StartsWith("Week · ") ? week.Label.Substring(7) + " week" : week.Label)
+                      + " " + Math.Round(week.Pct) + "%";
             if (Api == null) text += " · " + Fmt.Ago(DateTime.UtcNow - LastGood.FetchedUtc);   // the previous run's response
             else if (Api.RateLimited) text += " · stale, retry " + Fmt.Clock(ToLocal(nextFetchUtc));
             else if (Api.Error != null) text += " · stale";
@@ -831,7 +835,7 @@ namespace ClaudeUsageTray
         }
 
         // A monochrome glyph that sits with the system tray icons: a dial whose pie fills clockwise
-        // from twelve with the 5-hour session and whose ring fills with the week. The pie closes into
+        // from twelve with the 5-hour session and whose ring fills with the fullest weekly limit. The pie closes into
         // a solid disc and the ring into a full circle when a limit is used up. Colour appears only
         // as a signal (amber 80%+, red 95%+ on any limit); exact figures live in the tooltip.
         // pct < 0 means no data.
