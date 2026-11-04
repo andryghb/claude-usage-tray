@@ -2,7 +2,7 @@
 
 A tiny Windows tray widget that shows how much of your Claude plan you've used: the
 5-hour session and weekly limits, plus your recent Claude Code activity. It sits quietly in
-the tray and changes color only when a limit gets close.
+the tray and turns red only when a limit is nearly used up.
 
 > Unofficial community project. Not affiliated with or endorsed by Anthropic.
 
@@ -14,11 +14,11 @@ the tray and changes color only when a limit gets close.
 
 ## Features
 
-- **Tray dial:** a monochrome dial whose inner pie fills clockwise with your 5-hour session
-  usage and whose outer ring fills with your fullest weekly limit, all models or a single
-  model's. The pie closes into a solid disc and the ring into a full circle when a limit is
-  used up. It turns amber when any limit reaches 80% and red at 95%. Hover for exact numbers
-  and reset times.
+- **Tray dial:** your weekly limits as two layers that fill clockwise from twelve: gray for
+  all models and orange for the fullest single-model limit, such as Fable. The smaller value
+  sits on top, so each colour ends at its own figure. With a 5-hour limit the layers fill the
+  outer ring around a pie for the session; on plans without one they fill the whole dial. A
+  part turns red when its limit reaches 95%. Hover for exact numbers and reset times.
 - **Popup:** click the icon for session and weekly rings, a bar per limit, and charts of
   your Claude Code activity by hour and by day, broken down by model.
 - **Notifications** when a limit crosses 80% and 95%.

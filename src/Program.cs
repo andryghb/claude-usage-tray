@@ -359,7 +359,7 @@ namespace ClaudeUsageTray
         public double Pct;
         public DateTime? ResetUtc;
 
-        // Alert thresholds shared by the tray tint and the balloon notifications.
+        // Alert thresholds for the balloon notifications; at BadPct the tray also draws that limit red.
         public const int WarnPct = 80, BadPct = 95;
 
         // Percent for display and alerting: a limit the API flags as hit counts as full.
@@ -644,7 +644,7 @@ namespace ClaudeUsageTray
 
             tray.ContextMenuStrip = menu;
             tray.Text = "Claude usage — loading";
-            SetIcon(-1, -1, 0);
+            SetIcon(-1, -1, -1);
             tray.Visible = true;
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) popup.Toggle(); };
 
@@ -799,17 +799,26 @@ namespace ClaudeUsageTray
         {
             var limits = Limits();
             var session = limits.FirstOrDefault(l => l.Kind == "session");
-            // The ring shows the fullest weekly limit, all models or a single model's; ties go to all models.
-            var week = limits.Where(l => l.Kind.StartsWith("weekly"))
-                .OrderByDescending(l => l.EffectivePct).ThenBy(l => l.Kind == "weekly_all" ? 0 : 1).FirstOrDefault();
-            if (session == null) { SetIcon(-1, -1, 0); tray.Text = Trim("Claude usage — " + (Api != null && Api.Error != null ? Api.Error : "no data")); return; }
+            var all = limits.FirstOrDefault(l => l.Kind == "weekly_all");
+            // The orange layer follows the fullest single-model weekly limit, such as Fable's.
+            var scoped = limits.Where(l => l.Kind == "weekly_scoped").OrderByDescending(l => l.EffectivePct).FirstOrDefault();
+            if (session == null && all == null && scoped == null)
+            {
+                SetIcon(-1, -1, -1);
+                tray.Text = Trim("Claude usage — " + (Api != null && Api.Error != null ? Api.Error : "no data"));
+                return;
+            }
 
-            SetIcon(session.EffectivePct, week == null ? -1 : week.EffectivePct, limits.Max(l => l.EffectivePct));
-            var text = "Claude · 5h " + Math.Round(session.Pct) + "%";
-            if (session.ResetUtc.HasValue) text += " (" + Fmt.Span(session.ResetUtc.Value - NowUtc) + ")";
-            if (week != null)
-                text += " · " + (week.Kind == "weekly_all" ? "week" : week.Label.StartsWith("Week · ") ? week.Label.Substring(7) + " week" : week.Label)
-                      + " " + Math.Round(week.Pct) + "%";
+            SetIcon(session == null ? -1 : session.EffectivePct, all == null ? -1 : all.EffectivePct, scoped == null ? -1 : scoped.EffectivePct);
+            var text = "Claude";
+            if (session != null)
+            {
+                text += " · 5h " + Math.Round(session.Pct) + "%";
+                if (session.ResetUtc.HasValue) text += " (" + Fmt.Span(session.ResetUtc.Value - NowUtc) + ")";
+            }
+            if (all != null) text += " · week " + Math.Round(all.Pct) + "%";
+            if (scoped != null)
+                text += " · " + (scoped.Label.StartsWith("Week · ") ? scoped.Label.Substring(7) + " week" : scoped.Label) + " " + Math.Round(scoped.Pct) + "%";
             if (Api == null) text += " · " + Fmt.Ago(DateTime.UtcNow - LastGood.FetchedUtc);   // the previous run's response
             else if (Api.RateLimited) text += " · stale, retry " + Fmt.Clock(ToLocal(nextFetchUtc));
             else if (Api.Error != null) text += " · stale";
@@ -833,24 +842,23 @@ namespace ClaudeUsageTray
             }
         }
 
-        // A monochrome glyph that sits with the system tray icons: a dial whose pie fills clockwise
-        // from twelve with the 5-hour session and whose ring fills with the fullest weekly limit. The pie closes into
-        // a solid disc and the ring into a full circle when a limit is used up. Colour appears only
-        // as a signal (amber 80%+, red 95%+ on any limit); exact figures live in the tooltip.
-        // pct < 0 means no data.
-        void SetIcon(double session, double week, double worst)
+        // The dial. Weekly limits share one sweep from twelve as two layers: gray for all models and
+        // orange for the fullest single-model limit. The fuller layer is drawn first and the other on
+        // top, so each colour ends at its own value. With a 5-hour limit the layers fill the outer ring
+        // and a pie in the middle shows the session; without one they fill the whole dial. A part turns
+        // red once its limit reaches BadPct. Exact figures live in the tooltip.
+        // pct < 0 means the plan has no such limit; all three absent means no data.
+        void SetIcon(double session, double all, double scoped)
         {
             int s = SystemInformation.SmallIconSize.Width;
             bool lightBar = Palette.TaskbarLight();
             // Whole degrees are finer than 16px shows. Called every 30s but the inputs change rarely:
             // skip identical redraws (and the Explorer round trip).
-            int sd = Degrees(session), wd = Degrees(week);
-            int alert = worst >= Limit.BadPct ? 2 : worst >= Limit.WarnPct ? 1 : 0;
-            var key = s + "|" + lightBar + "|" + sd + "|" + wd + "|" + alert;
+            var key = s + "|" + lightBar + "|" + PartKey(session) + "|" + PartKey(all) + "|" + PartKey(scoped);
             if (key == iconKey) return;
             iconKey = key;
 
-            using (var bmp = IconBitmap(s, lightBar, sd, wd, alert))
+            using (var bmp = IconBitmap(s, lightBar, session, all, scoped))
             {
                 var hicon = bmp.GetHicon();
                 var icon = (Icon)Icon.FromHandle(hicon).Clone();
@@ -862,16 +870,47 @@ namespace ClaudeUsageTray
         }
 
         static int Degrees(double pct) { return pct < 0 ? -1 : (int)Math.Round(Math.Min(100, pct) * 3.6); }
+        static bool Red(double pct) { return pct >= Limit.BadPct; }
+        static string PartKey(double pct) { return Degrees(pct) + (Red(pct) ? "r" : ""); }
 
-        // Session and week as whole degrees of sweep, -1 for no data; alert 0, 1 (warn) or 2 (bad).
-        public static Bitmap IconBitmap(int s, bool lightBar, int sessionDeg, int weekDeg, int alert)
+        // A hint of fill even at 1%, so "in use" never reads as "empty"; the 8° floor also keeps the
+        // arcs and pies clear of GDI+'s near-zero-sweep exception. 0 means nothing to draw.
+        static float Sweep(double pct)
+        {
+            int d = Degrees(pct);
+            return d <= 0 ? 0 : d >= 360 ? 360 : Math.Max(8, d);
+        }
+
+        // Draws the two weekly layers through draw(colour, sweep): the fuller one first, the other on
+        // top. On a tie the orange one stays visible.
+        static void Layers(float allSweep, Color allInk, float scopedSweep, Color scopedInk, Action<Color, float> draw)
+        {
+            if (allSweep >= scopedSweep)
+            {
+                if (allSweep > 0) draw(allInk, allSweep);
+                if (scopedSweep > 0) draw(scopedInk, scopedSweep);
+            }
+            else
+            {
+                draw(scopedInk, scopedSweep);
+                if (allSweep > 0) draw(allInk, allSweep);
+            }
+        }
+
+        // Each argument is a limit's percent, or -1 when the plan doesn't have that limit.
+        public static Bitmap IconBitmap(int s, bool lightBar, double session, double all, double scoped)
         {
             var tp = Palette.For(lightBar);   // the tray follows the taskbar theme, not the apps theme
             var fg = lightBar ? Color.FromArgb(28, 28, 28) : Color.FromArgb(245, 245, 245);
-            var ink = alert >= 2 ? tp.Bad : alert == 1 ? tp.Warn : fg;
-            // The ring's track is the same foreground at low alpha, so it reads on any taskbar colour,
+            bool noData = session < 0 && all < 0 && scoped < 0;
+            // The track is the taskbar's foreground at low alpha, so it reads on any taskbar colour,
             // and fainter still while there is nothing to show.
-            var track = Color.FromArgb(sessionDeg < 0 ? (lightBar ? 48 : 63) : (lightBar ? 80 : 105), fg);
+            var track = Color.FromArgb(noData ? (lightBar ? 26 : 36) : (lightBar ? 42 : 56), fg);
+            // Opaque layer colours, so the layer on top never blends with the one beneath it.
+            var gray = lightBar ? Color.FromArgb(149, 149, 149) : Color.FromArgb(138, 138, 138);
+            Color allInk = Red(all) ? tp.Bad : gray;
+            Color scopedInk = Red(scoped) ? tp.Bad : tp.Warn;   // the palette's amber orange
+            float allSweep = Sweep(all), scopedSweep = Sweep(scoped), sessionSweep = Sweep(session);
 
             const int ss = 4;   // drawn at 4x and downsampled, for clean edges at 16px
             var bmp = new Bitmap(s, s, PixelFormat.Format32bppArgb);
@@ -882,22 +921,43 @@ namespace ClaudeUsageTray
                     g.SmoothingMode = SmoothingMode.AntiAlias;
                     g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                     float u = s * ss / 16f;   // one unit = one pixel of a 16px icon
-                    float c = 8 * u, ringW = 3f * u;
-                    // Flat ends on the arc and a whole-pixel stroke keep the ring as crisp as the pie.
-                    var ring = new RectangleF(ringW / 2, ringW / 2, 16 * u - ringW, 16 * u - ringW);
-                    using (var p = new Pen(track, ringW)) g.DrawEllipse(p, ring);
-                    // A hint of fill even at 1%, so "in use" never reads as "empty"; the 8° floor also
-                    // keeps the arc and pie clear of GDI+'s near-zero-sweep exception.
-                    if (weekDeg > 0)
-                        using (var p = new Pen(ink, ringW)) g.DrawArc(p, ring, -90, Math.Max(8, weekDeg));
-                    if (sessionDeg > 0)
+                    var dial = new RectangleF(0, 0, 16 * u, 16 * u);
+                    if (session < 0)
                     {
-                        float pieR = 4f * u;
-                        var pie = new RectangleF(c - pieR, c - pieR, 2 * pieR, 2 * pieR);
-                        using (var b = new SolidBrush(ink))
+                        // No 5-hour limit, or no data yet: the weekly layers fill the whole dial.
+                        using (var trackBrush = new SolidBrush(track)) g.FillEllipse(trackBrush, dial);
+                        Layers(allSweep, allInk, scopedSweep, scopedInk, (ink, sweep) =>
                         {
-                            if (sessionDeg >= 360) g.FillEllipse(b, pie);
-                            else g.FillPie(b, pie.X, pie.Y, pie.Width, pie.Height, -90, Math.Max(8, sessionDeg));
+                            using (var layer = new SolidBrush(ink))
+                            {
+                                if (sweep >= 360) g.FillEllipse(layer, dial);
+                                else g.FillPie(layer, dial.X, dial.Y, dial.Width, dial.Height, -90, sweep);
+                            }
+                        });
+                    }
+                    else
+                    {
+                        // The weekly layers on the outer ring, the session in a pie inside it. Flat ends and
+                        // a whole-pixel stroke keep the ring as crisp as the pie.
+                        float ringW = 3f * u, c = 8 * u, pieR = 4f * u;
+                        var ring = RectangleF.Inflate(dial, -ringW / 2, -ringW / 2);
+                        using (var trackPen = new Pen(track, ringW)) g.DrawEllipse(trackPen, ring);
+                        Layers(allSweep, allInk, scopedSweep, scopedInk, (ink, sweep) =>
+                        {
+                            using (var layer = new Pen(ink, ringW))
+                            {
+                                if (sweep >= 360) g.DrawEllipse(layer, ring);
+                                else g.DrawArc(layer, ring, -90, sweep);
+                            }
+                        });
+                        if (sessionSweep > 0)
+                        {
+                            var pie = new RectangleF(c - pieR, c - pieR, 2 * pieR, 2 * pieR);
+                            using (var b = new SolidBrush(Red(session) ? tp.Bad : fg))
+                            {
+                                if (sessionSweep >= 360) g.FillEllipse(b, pie);
+                                else g.FillPie(b, pie.X, pie.Y, pie.Width, pie.Height, -90, sessionSweep);
+                            }
                         }
                     }
                 }
